@@ -1,0 +1,321 @@
+---
+title: "CMSC320 Spring 2019 Final Project"
+author: "Samuel Soon"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rvest)
+library(dplyr)
+library(broom)
+library(tidyr)
+library(tidyverse)
+library(stringr)
+library(lubridate)
+```
+
+## Introduction
+
+The purpose of this tutorial is to guide people through the data science pipeline: data scraping, data manipulation, and finally data modeling and analysis. For this, I will be using data collected on suicide rates throughout various countries and years. Suicide is an heavy topic, with the capability to drastically affect anyones' life. This makes it all the more important to explore and understand it. Knowing what influences suicide, how much of a problem it is, and how suicide rates are distributed can all be helpful in designing countermeasures. I will test for relationships among the following factors and suicide rate, and draw conclusions from modeling the data.
+
+We will try to find answers to each of the following questions in this tutorial:\
+1. How does the average suicide rate change across time? Is it changing in a linear fashion?\
+2. Does age group make a difference in suicide rate over time? \
+3. Is there a noticeable difference in average male/female suicide rates?\
+4. For the countries from the suicide table who have an education index, is there a relationship between the education index rating and suicide rates?\
+\
+
+Notes: \
+-Only 101 countries are on display in the suicide data table used for this tutorial, conclusions drawn may differ from those established by more credible studies.\
+-The education index is a measure of a country's education quality, given by the equation $I = \frac{MYS}{30} + \frac{EYS}{36}$, where MYS is the mean number of years spent in school and EYS is the expected number of years spent in school.\
+-Not every country in the education index table is in the suicide database. Only 95 of 101  countries included in the suicide data have an education index, so we will only use those 95 countries in our data analysis of suicide rate and education index.
+
+
+## Data Curation
+
+First, we will obtain the data relating to suicides across countries, which is contained as a csv file. We will use read.csv to obtain the data table, then remove all the columns that we don't need for this analysis (HDI, gdp, population, etc.). For this tutorial, the only factors we need from the table are country, year, sex, age, and suicides per 100k population. We will finish by capitalizing the first letter of the country column just to make joining with the education index table easier later.
+
+```{r w1}
+suicide <- read.csv(file="master.csv", header = TRUE, sep = ",", stringsAsFactors = FALSE)
+suicide <- suicide %>% 
+  subset(select = -c(country.year,HDI.for.year, suicides_no, population, gdp_for_year...., gdp_per_capita....,generation))
+names(suicide)[1] <- "Country"
+suicide %>%
+  head()
+```
+
+We still need to get the data related to the education index. We will need to scrape and tidy this data from wikipedia, so it will be a bit more complicated. First, we will obtain the url, and then use the html_nodes function to obtain all of the "tr td" elements on the page("tr td" signifies that the element is part of a table). 
+```{r w2, warning=FALSE}
+url <- "https://en.wikipedia.org/wiki/Education_Index"
+edi <- url %>% 
+  read_html() %>% 
+  html_nodes("tr td") %>% 
+  html_text()  
+edi %>% 
+  head()
+```
+
+Now, we have all of the table data on the page as a vector of strings. We then filter out all of the elements we don't need by only taking the subset of the strings relating to the education index data, and then collapsing the entire array into a single string by using the paste function. We then create our rows for the data table by using the str_split function to separate the giant string into smaller strings based on newline characters, and then convert our array of lines into a data table.
+
+```{r w3, warning=FALSE}
+edi <- edi[4:1131] %>% 
+  paste(sep = " ", collapse = " ") %>% 
+  str_split("\n") 
+edi <- edi[[1]] %>% 
+  as_data_frame()
+edi
+```
+
+Now we will move on to tidying out data. First, we get rid of the first columns which indicates the ranking of each country, since that data is irrelevant. Then, we separate the alphabetic and numerical values into two columns. I create a column for the "Country" attribute, then remove the unnecessary spaces at the beginning and end of each string. Then, I delete the "Country" names from the original "value" column, leaving a string of 4 numeric values separated by spaces. After removing any unnecessary spaces from the column, I separate it into four distinct columns, each one meant for holding one of the values. I remove the original "value" column, and convert the four new columns' data types from chr to their respective numeric types. Finally, I remove the last row, which is an empty entity, and our tidying is done.
+```{r w4, warning = FALSE}
+edi$value <- edi$value %>% 
+  str_replace("\\d+\\s+", "") 
+edi <- edi %>% 
+  separate(value, c("Country", NA), sep = "(?=\\d+)", remove = FALSE)
+edi$Country <- gsub("(^\\s|\\s$)", "", edi$Country)
+edi$intvalues <- gsub("([a-z|A-Z|'|-]+\\s*)+", "", edi$value)
+edi$intvalues <- sub("^\\s+", "", edi$intvalues)
+edi <- edi %>% 
+  separate(intvalues, c("Index", "meanYears", "expYears", "HDI"), sep = " ", remove = TRUE)
+edi <- edi[2:6]
+edi$Index <- as.numeric(edi$Index)
+edi$meanYears <- as.numeric(edi$meanYears)
+edi$expYears <- as.numeric(edi$expYears)
+edi$HDI <- as.numeric(edi$HDI)
+edi<- edi[1:188,] 
+edi
+
+```
+
+
+
+## Data Manipulation
+Now that we're done setting up our initial data, we need to create tables that hold the data to help answer each of the questions mentioned in the introduction.\
+\
+To create data to help test the relationship of [suicide rate vs time] and [suicide rate vs age] respectively, we will have to find the mean suicide rate for each value of each factor. We can do this easily by grouping by the variables relevant to the data, and then finding the mean suicide rate across each value of the variable(s) using the summarize function.
+
+```{r m1}
+yearsuicide <- suicide %>% 
+  group_by(year) %>% 
+  summarize(mean = mean(suicides.100k.pop))
+yearsuicide %>% 
+  head()
+
+agesuicide <- suicide %>% 
+  group_by(age, year) %>% 
+  summarize(suicides = mean(suicides.100k.pop))
+agesuicide
+
+
+```
+
+Since we just want the distribution of suicide rates over gender, we can just take the sex and suicide rate attributes as is without altering them.
+
+```{r m2}
+
+gendersuicide <- data.frame(sex = suicide$sex, suicides = suicide$suicides.100k.pop)
+gendersuicide %>% 
+  head()
+```
+
+Finally, we will have to join the suicide data and education index data for the last question. Since education index is grouped by country, we will first create a table that displays the average suicide rate grouped by country.
+
+```{r m3}
+countrysuicide <- suicide %>% 
+  group_by(Country) %>% 
+  summarize(mean = mean(suicides.100k.pop))
+```
+
+Then, we will use the left_join function to join the two tables, creating a table where we can access both the education index and average suicide rate of the country. We will delete the entities that don't have an education index, and we're all set.
+
+```{r m4}
+edusuicide <- left_join(countrysuicide, edi, by = "Country")
+edusuicide <- edusuicide[!is.na(edusuicide$Index),]
+edusuicide %>% 
+  head()
+
+```
+
+## Data Analysis
+
+### Time
+
+To find the relationship between time and average suicide rate across the globe, we will first use the lm function to fit the data we got from the previous part to a linear model.
+
+```{r g1}
+timelm <- lm(mean~year, data = yearsuicide)
+timelm %>% 
+  tidy()
+
+```
+
+From the results of the lm function, we know the following:\
+1. On average, the suicide rate decreases by ~0.059 people per 100k per year based on our data.\
+2. Because our p-value is less than 0.05, we can conclude that the possibility of there being no relationship between year and suicide rate is extremely low, and reject the null hypothesis.\
+\
+From these facts, we can conclude that there is a relationship between time and suicide rate, and that the relationship is most likely negative.\
+\
+While we know that there is some relationship between the two variables, we still need to decide whether a linear model would be the best fit. To do this, we will first plot our data with a regression line.
+
+```{r g1b}
+timeplot <- yearsuicide %>%
+  ggplot(aes(x=year, y = mean)) + geom_point() + geom_line() +  geom_smooth(method = lm) + labs(title="Mean Suicide Rate vs Year", x="Year", y="Suicides Per 100k")
+timeplot
+```
+
+Then, we will use the augment function to obtain the residuals and fitted values of the plot, then plot the residuals vs fitted values graph. If the resulting graph does not follow any sort of pattern or uneven spread, then we can assume that a linear model is a good fit.
+
+```{r g1c}
+timeaug <- timelm %>% 
+  augment()
+timeaug
+
+timeres <- timeaug %>% 
+  ggplot(aes(x=.fitted, y=.resid)) + geom_point() +  labs(title="Fitted Values vs Residuals", x="Fitted", y="Residuals")
+timeres
+
+```
+
+Because the fitted values plot is clearly following a pattern, we can conclude that a nonlinear model is a better fit for this relation.
+
+### Age
+
+In order to determine if age group has an effect on suicide rate over time, we will first plot average suicide rate per age group per year over time, grouped by age group.
+
+```{r g2}
+ageplot <- agesuicide %>% 
+  ggplot(aes(x = year, y = suicides, color = factor(age))) + geom_point() + geom_smooth(method = lm) + labs(title="Mean Suicide Rate vs Year", x="Year", y="Suicides Per 100k")
+ageplot
+```
+
+From the plot, we can tell that each age group seems to have a different slope from each other; the 75+ age group seems to be decreasing the fastest over time. We will verify that age group has an effect on suicide rate over time by looking at the linear regression models for each group:
+
+```{r g2b}
+agelm <- lm(suicides~year, data = agesuicide[agesuicide$age == "75+ years",])
+agelm %>%
+  tidy()
+agelm2 <- lm(suicides~year, data = agesuicide[agesuicide$age == "55-74 years",])
+agelm2 %>% 
+  tidy()
+agelm3 <- lm(suicides~year, data = agesuicide[agesuicide$age == "35-54 years",])
+agelm3 %>%
+  tidy()
+agelm4 <- lm(suicides~year, data = agesuicide[agesuicide$age == "25-34 years",])
+agelm4 %>%
+  tidy()
+agelm5 <- lm(suicides~year, data = agesuicide[agesuicide$age == "15-24 years",])
+agelm5 %>%
+  tidy()
+agelm6 <- lm(suicides~year, data = agesuicide[agesuicide$age == "5-14 years",])
+agelm6 %>% 
+  tidy()
+```
+
+From these models, we can see that all age groups have a unique slope, and that the p-values of all groups except the 35-54 years group is less than 0.05.\
+\
+Based on these results, we can conclude that age group does have an effect on the rate of suicide over time.
+\
+
+
+### Gender
+
+To see whether there is a noticeable difference in male and female suicide rate, we will find the z-score of average male suicide rate in relation to the normal distribution of female suicide rate. If the mean male suicide rate is more than two standard deviations away from the mean female suicide rate, then we will assume that there is a notable difference between the two values. Otherwise, we will stick with the null hypothesis, which states that there is no difference between the two. To find the z-score, we will find the p-score of male suicide rate using pnorm. This tells us the probability of the male suicide rate being greater than that of the female's. We will then apply the qnorm to our answer, which will give us the z-score of that probability.
+
+```{r g3}
+
+malesuicide <- gendersuicide[gendersuicide$sex =="male",]$suicides
+femalesuicide <- gendersuicide[gendersuicide$sex =="female",]$suicides
+malenorm <- qnorm(pnorm(mean(malesuicide), mean = mean(femalesuicide), sd = sd(femalesuicide)))
+malenorm
+
+```
+
+Because the returned z-score is above 2, we can conclude that there is a noticeable difference between male and female suicide rates.\
+\
+You can see this difference by comparing the violin plots of male and female suicide rates. Female suicide rate is distributed much more flatly and is lower than the male suicide rate distribution overall.
+
+```{r g3b}
+genderviolin <- gendersuicide %>% 
+  ggplot(aes(x = factor(sex), y = suicides)) + geom_violin() + labs(title="Suicide Rate vs Gender", x="Gender", y="Suicides Per 100k")
+genderviolin
+
+```
+
+### Education Index
+
+To find the relationship between education index and suicide rate across countries, we will use lm again to create a linear regression model.
+
+```{r g4}
+edulm <- lm(mean~Index, data = edusuicide)
+edulm %>% tidy()
+```
+
+The given p-value is extremely low, meaning that we can reject the null hypothesis and assume that there is a relationship between the education index and suicide rate.\
+\
+
+Here is the regression line over the scatter plot of suicide rate vs education index:
+
+```{r g4b}
+
+eduplot <- edusuicide %>% 
+  ggplot(aes(x = Index, y = mean)) + geom_point() + geom_smooth(method = lm) + labs(title="Mean Suicide Rate vs Education Index", x="Education Index", y= "Suicides Per 100k")
+eduplot
+```
+
+To see whether a linear model fits the data, we will use augment to get the fitted values and residuals, then create a fitted values plot again.
+
+```{r g4c}
+eduaug <- edulm %>% 
+  augment()
+eduaug
+
+edures <- eduaug %>% 
+  ggplot(aes(x = .fitted, y = .resid)) + geom_point() + labs(title="Fitted Values vs Residuals", x="Fitted", y="Residuals")
+edures
+```
+
+In contrast to our fitted values plot of Mean Suicide Rate vs Year, the distribution of this plot does not follow any pattern, and seems to be spread around randomly. This indicates that a linear model is a good fit for this data. 
+
+## Conclusion
+
+In this tutorial, we used data based around suicide rates across time and countries to explore the data analysis pipeline. First, we obtained and tidied our data to prepare it for parsing. Then, we used our manipulated data to create tables for each of our questions, making the analysis step simpler. Finally, we used linear regression and modelling to explore and answer each of the questions presented, and learned how to tell if two variables were likely to be dependent on each other, whether those two variables were likely to have a linear relationship, and how to test whether two values are likely to be different from each other by using the pnorm and qnorm functions.\
+\
+From each of the questions we asked, we have found out the following:\
+-Suicide rate has a negative relationship with time, but that relationship may not necessarily be linear.\
+-We can conclude that age group does have a significant effect on change in suicide rate over time.\
+-There is a noticeable difference in suicide rates among genders, with males having a higher suicide rate.\
+-There is a relationship between a country's education index and suicide rates, and that relationship is most likely linear. 
+
+## Links
+
+### Suicide Data Used in Tutorial
+
+https://www.kaggle.com/russellyates88/suicide-rates-overview-1985-to-2016
+\
+Contains data about suicide demographics sorted by country and year. Used as main source of information in tutorial.
+
+### Educational Index Used in Tutorial
+
+https://en.wikipedia.org/wiki/Education_Index
+\
+Information about the education index, and contains the table of education index by country used in the tutorial.
+
+### Information About Suicide in the USA
+
+https://afsp.org/about-suicide/suicide-statistics/
+\
+Provides some extra information about suicide, specific to the USA for anyone who is curious.
+
+### Suicide Prevention Research Center
+
+https://www.sprc.org/strategic-planning/data
+\
+Lists reasons why data collection of suicide is important, and other ways of looking at and analyzing suicide data not covered in the tutorial.
+
+### Worldwide Suicide Information
+
+https://ourworldindata.org/suicide
+\
+Goes more into detail about suicide, including history, methods, timing, comparisons across countries, etc.
+
